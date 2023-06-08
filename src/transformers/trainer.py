@@ -147,6 +147,7 @@ from .utils import (
     is_datasets_available,
     is_in_notebook,
     is_ipex_available,
+    is_peft_available,
     is_safetensors_available,
     is_sagemaker_dp_enabled,
     is_sagemaker_mp_enabled,
@@ -203,6 +204,10 @@ else:
 
 if is_safetensors_available():
     import safetensors.torch
+
+
+if is_peft_available():
+    from peft import PeftModel
 
 
 skip_first_batches = None
@@ -1645,6 +1650,7 @@ class Trainer:
     def _inner_training_loop(
         self, batch_size=None, args=None, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None
     ):
+        self.accelerator.free_memory()
         self._train_batch_size = batch_size
         logger.debug(f"Currently training with a batch size of: {self._train_batch_size}")
         # Data loader and number of training steps
@@ -1741,9 +1747,7 @@ class Trainer:
 
         # prepare using `accelerator` prepare
         if use_accelerator_prepare:
-            model, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
-                self.model, self.optimizer, self.lr_scheduler
-            )
+            model, self.optimizer = self.accelerator.prepare(self.model, self.optimizer)
 
         if self.is_fsdp_enabled:
             self.model = model
@@ -1990,6 +1994,7 @@ class Trainer:
                         optimizer_was_run = scale_before <= scale_after
                     else:
                         self.optimizer.step()
+                        optimizer_was_run = not self.accelerator.optimizer_step_was_skipped
 
                     if optimizer_was_run:
                         # Delay optimizer scheduling until metrics are generated
@@ -2897,13 +2902,15 @@ class Trainer:
         output_dir = output_dir if output_dir is not None else self.args.output_dir
         os.makedirs(output_dir, exist_ok=True)
         logger.info(f"Saving model checkpoint to {output_dir}")
+
+        supported_classes = (PreTrainedModel,) if not is_peft_available() else (PreTrainedModel, PeftModel)
         # Save a trained model and configuration using `save_pretrained()`.
         # They can then be reloaded using `from_pretrained()`
-        if not isinstance(self.model, PreTrainedModel):
+        if not isinstance(self.model, supported_classes):
             if state_dict is None:
                 state_dict = self.model.state_dict()
 
-            if isinstance(unwrap_model(self.model), PreTrainedModel):
+            if isinstance(unwrap_model(self.model), supported_classes):
                 unwrap_model(self.model).save_pretrained(
                     output_dir, state_dict=state_dict, safe_serialization=self.args.save_safetensors
                 )
@@ -3134,13 +3141,29 @@ class Trainer:
 
         prediction_loss_only = prediction_loss_only if prediction_loss_only is not None else args.prediction_loss_only
 
-        # if eval is called w/o train init deepspeed here
+        # if eval is called w/o train, handle model prep here
         if self.is_deepspeed_enabled and self.model_wrapped is self.model:
             _, _ = deepspeed_init(self, num_training_steps=0, inference=True)
-            model = self.accelerator.prepare(self.model)
-            self.model_wrapped = self.deepspeed = model
 
         model = self._wrap_model(self.model, training=False, dataloader=dataloader)
+
+        if len(self.accelerator._models) == 0 and model is self.model:
+            model = (
+                self.accelerator.prepare(model)
+                if self.is_deepspeed_enabled
+                else self.accelerator.prepare_model(model, evaluation_mode=True)
+            )
+
+            if self.is_fsdp_enabled:
+                self.model = model
+
+            # for the rest of this function `model` is the outside model, whether it was wrapped or not
+            if model is not self.model:
+                self.model_wrapped = model
+
+            # backward compatibility
+            if self.is_deepspeed_enabled:
+                self.deepspeed = self.model_wrapped
 
         # if full fp16 or bf16 eval is wanted and this ``evaluation`` or ``predict`` isn't called
         # while ``train`` is running, cast it to the right dtype first and then put on device
@@ -3729,13 +3752,29 @@ class Trainer:
 
         prediction_loss_only = prediction_loss_only if prediction_loss_only is not None else args.prediction_loss_only
 
-        # if eval is called w/o train init deepspeed here
+        # if eval is called w/o train, handle model prep here
         if self.is_deepspeed_enabled and self.model_wrapped is self.model:
             _, _ = deepspeed_init(self, num_training_steps=0, inference=True)
-            model = self.accelerator.prepare(self.model)
-            self.model_wrapped = self.deepspeed = model
 
         model = self._wrap_model(self.model, training=False, dataloader=dataloader)
+
+        if len(self.accelerator._models) == 0 and model is self.model:
+            model = (
+                self.accelerator.prepare(model)
+                if self.is_deepspeed_enabled
+                else self.accelerator.prepare_model(model, evaluation_mode=True)
+            )
+
+            if self.is_fsdp_enabled:
+                self.model = model
+
+            # for the rest of this function `model` is the outside model, whether it was wrapped or not
+            if model is not self.model:
+                self.model_wrapped = model
+
+            # backward compatibility
+            if self.is_deepspeed_enabled:
+                self.deepspeed = self.model_wrapped
 
         # if full fp16 or bf16 eval is wanted and this ``evaluation`` or ``predict`` isn't called
         # while ``train`` is running, cast it to the right dtype first and then put on device
