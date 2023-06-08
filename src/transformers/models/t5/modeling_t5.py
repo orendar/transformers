@@ -18,6 +18,7 @@
 import copy
 import math
 import os
+import random
 import warnings
 from typing import Optional, Tuple, Union
 
@@ -1042,7 +1043,16 @@ class T5Stack(T5PreTrainedModel):
 
         hidden_states = self.dropout(inputs_embeds)
 
+        ### MINE
+        if self.is_decoder:
+            self.do_skip = self.skip_prob > self.random.uniform(0, 1)
+
         for i, (layer_module, past_key_value) in enumerate(zip(self.block, past_key_values)):
+            #### MINE
+            if self.is_decoder and self.do_skip:
+                if i in self.skip_layers:
+                    continue
+            ###
             layer_head_mask = head_mask[i]
             cross_attn_layer_head_mask = cross_attn_head_mask[i]
             # Model parallel
@@ -1536,6 +1546,9 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
 
     def __init__(self, config: T5Config):
         super().__init__(config)
+
+        self.skip_layers = [2]
+        self.skip_prob = 0.5
         self.model_dim = config.d_model
 
         self.shared = nn.Embedding(config.vocab_size, config.d_model)
@@ -1551,6 +1564,8 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
         decoder_config.is_encoder_decoder = False
         decoder_config.num_layers = config.num_decoder_layers
         self.decoder = T5Stack(decoder_config, self.shared)
+        self.decoder.skip_layers = self.skip_layers
+        self.decoder.skip_prob = self.skip_prob
 
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
