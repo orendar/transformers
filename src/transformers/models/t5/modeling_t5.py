@@ -1049,7 +1049,7 @@ class T5Stack(T5PreTrainedModel):
 
         for i, (layer_module, past_key_value) in enumerate(zip(self.block, past_key_values)):
             #### MINE
-            if self.is_decoder and self.do_skip:
+            if self.training and self.is_decoder and self.do_skip:
                 if i in self.skip_layers:
                     continue
             ###
