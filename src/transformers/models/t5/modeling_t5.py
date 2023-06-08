@@ -1045,7 +1045,7 @@ class T5Stack(T5PreTrainedModel):
 
         ### MINE
         if self.is_decoder:
-            self.do_skip = self.skip_prob > self.random.uniform(0, 1)
+            self.do_skip = self.skip_prob > random.uniform(0, 1)
 
         for i, (layer_module, past_key_value) in enumerate(zip(self.block, past_key_values)):
             #### MINE
